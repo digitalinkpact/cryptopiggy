@@ -1,0 +1,9 @@
+ccxt
+pandas
+pandas-ta
+numpy
+torch
+scikit-learn
+python-telegram-bot
+streamlit
+requests
