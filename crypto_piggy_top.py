@@ -262,15 +262,19 @@ class CryptoPiggyTop2026:
 
     def is_live(self):
         """Check if bot is in live trading mode with all safety checks passed."""
+        allow_live = os.getenv('ALLOW_LIVE') == '1'
         if self.backend_enabled:
             backend_ok = self.backend_last_health is True
         else:
             backend_ok = True
-        return (not self.paper_mode and 
-                self.live_confirmed and 
-                (self.exchange is not None or self.backend_enabled) and
-                not self.dry_run and
-                backend_ok)
+        return (
+            not self.paper_mode
+            and self.live_confirmed
+            and allow_live
+            and (self.exchange is not None or self.backend_enabled)
+            and not self.dry_run
+            and backend_ok
+        )
 
     def set_backend(self, user_id, url=None, enabled=True):
         """Configure backend proxy settings."""
@@ -815,16 +819,13 @@ class CryptoPiggyTop2026:
 
     def enable_live(self):
         """Enable live trading mode with safety checks."""
-        if ccxt is None:
-            print("❌ ccxt not available; cannot enable live mode")
-            return False
-        
+        self._allow_live_env = os.getenv('ALLOW_LIVE') == '1'
         if not self._allow_live_env:
             print('❌ LIVE mode not allowed: Set ALLOW_LIVE=1 environment variable')
             return False
         
-        if self.exchange is None:
-            print('❌ No exchange configured. Run option 2 to configure API keys.')
+        if self.exchange is None and not self.backend_enabled:
+            print('❌ No exchange or backend configured. Run option 2 to configure API keys or enable backend mode.')
             return False
         
         # Confirmation prompt
@@ -857,6 +858,7 @@ class CryptoPiggyTop2026:
         self.daily_trades_count = 0
         self.daily_start_equity = self.get_equity()
         self.last_trade_reset_day = datetime.utcnow().day
+        self.save_state()
         
         print("\n✅ LIVE TRADING ENABLED")
         self.send_telegram("🔴 Live trading mode ENABLED")
@@ -977,7 +979,10 @@ class CryptoPiggyTop2026:
                     self.paper_cash = float(state.get('paper_cash', 10000.0) or 10000.0)
                 except Exception:
                     self.paper_cash = 10000.0
-                if self.paper_mode:
+                if os.getenv('ALLOW_LIVE') != '1':
+                    self.paper_mode = True
+                    self.live_confirmed = False
+                elif self.paper_mode:
                     self.live_confirmed = False
             except Exception:
                 logger.exception("Failed to load state.json")

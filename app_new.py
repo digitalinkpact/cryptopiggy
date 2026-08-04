@@ -342,9 +342,10 @@ with st.sidebar:
     )
 
     backend_ready = bool(creds.get('validated')) and health_ok
+    allow_live = os.getenv('ALLOW_LIVE') == '1'
 
     if live_mode_requested and not bot.is_live():
-        if not bot._allow_live_env:
+        if not allow_live:
             st.error('❌ Set ALLOW_LIVE=1 environment variable')
         elif not backend_ready:
             st.error('❌ Validate & Sync credentials and ensure backend health is OK')
@@ -368,6 +369,27 @@ with st.sidebar:
                 user_token = st.text_input('Enter LIVE_CONFIRM_TOKEN:', type='password', key='live_token')
                 if st.button('🔴 ENABLE LIVE TRADING', type='primary'):
                     if user_token == confirm_token:
+                        live_backend_ok = bot.check_backend_health() if bot.backend_enabled else True
+                        if bot.backend_enabled and not live_backend_ok:
+                            st.error('❌ Backend health check failed; live trading remains disabled')
+                        else:
+                            bot.backend_last_health = live_backend_ok
+                            bot.paper_mode = False
+                            bot.live_confirmed = True
+                            _reset_daily_tracking(bot)
+                            bot.send_telegram("🔴 Live trading ENABLED via Streamlit")
+                            logger.warning("LIVE TRADING MODE ENABLED BY USER")
+                            st.success('✅ Live trading enabled!')
+                            st.rerun()
+                    else:
+                        st.error('❌ Invalid confirmation token')
+            else:
+                if st.button('🔴 ENABLE LIVE TRADING (I understand the risks)', type='primary'):
+                    live_backend_ok = bot.check_backend_health() if bot.backend_enabled else True
+                    if bot.backend_enabled and not live_backend_ok:
+                        st.error('❌ Backend health check failed; live trading remains disabled')
+                    else:
+                        bot.backend_last_health = live_backend_ok
                         bot.paper_mode = False
                         bot.live_confirmed = True
                         _reset_daily_tracking(bot)
@@ -375,17 +397,6 @@ with st.sidebar:
                         logger.warning("LIVE TRADING MODE ENABLED BY USER")
                         st.success('✅ Live trading enabled!')
                         st.rerun()
-                    else:
-                        st.error('❌ Invalid confirmation token')
-            else:
-                if st.button('🔴 ENABLE LIVE TRADING (I understand the risks)', type='primary'):
-                    bot.paper_mode = False
-                    bot.live_confirmed = True
-                    _reset_daily_tracking(bot)
-                    bot.send_telegram("🔴 Live trading ENABLED via Streamlit")
-                    logger.warning("LIVE TRADING MODE ENABLED BY USER")
-                    st.success('✅ Live trading enabled!')
-                    st.rerun()
 
     elif not live_mode_requested and bot.is_live():
         bot.paper_mode = True
