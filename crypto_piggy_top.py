@@ -136,6 +136,7 @@ class CryptoPiggyTop2026:
         self.daily_trades_count = 0
         self.daily_start_equity = 0.0
         self.last_trade_reset_day = datetime.utcnow().day
+        self.paper_cash = 10000.0
         self.risk_settings = {
             'max_position_pct': min(0.01, MAX_PORTFOLIO_RISK_PCT),
             'trailing_stop_pct': 0.02,
@@ -158,7 +159,8 @@ class CryptoPiggyTop2026:
                 self.telegram_bot = None
         self.load_state()
         self.peak_equity = self.get_equity()
-        self.daily_start_equity = self.peak_equity
+        if self.daily_start_equity <= 0:
+            self.daily_start_equity = self.peak_equity
 
     def setup_exchange(self):
         """Initialize exchange connection with safety checks."""
@@ -261,7 +263,7 @@ class CryptoPiggyTop2026:
     def is_live(self):
         """Check if bot is in live trading mode with all safety checks passed."""
         if self.backend_enabled:
-            backend_ok = self.backend_last_health is not False
+            backend_ok = self.backend_last_health is True
         else:
             backend_ok = True
         return (not self.paper_mode and 
@@ -347,37 +349,56 @@ class CryptoPiggyTop2026:
 
     def get_equity(self):
         """Get current portfolio value (USD equivalent)."""
-        if self.is_live() and ccxt is not None:
-            try:
-                bal = self.safe_ccxt_call('fetch_balance')
-                if not bal:
-                    logger.warning("Failed to fetch live balance")
+        if self.is_live():
+            if self.backend_enabled:
+                try:
+                    bal = self.fetch_backend_balance()
+                    if isinstance(bal, dict):
+                        for key in ('total_equity', 'totalEquity', 'equity', 'balance_usd', 'usd_value'):
+                            if key in bal and isinstance(bal.get(key), (int, float)):
+                                return float(bal[key])
+                        if isinstance(bal.get('total'), (int, float)):
+                            return float(bal['total'])
+                        if isinstance(bal.get('balances'), dict):
+                            for stable in ('USDT', 'USD', 'USDC'):
+                                amt = bal['balances'].get(stable)
+                                if isinstance(amt, (int, float)):
+                                    return float(amt)
+                except Exception:
+                    logger.exception("Error fetching backend live equity")
+
+            if self.exchange is not None and ccxt is not None:
+                try:
+                    bal = self.safe_ccxt_call('fetch_balance')
+                    if not bal:
+                        logger.warning("Failed to fetch live balance")
+                        return 0.0
+
+                    total = 0.0
+                    if isinstance(bal, dict) and 'total' in bal:
+                        for currency, amount in bal['total'].items():
+                            if isinstance(amount, (int, float)) and amount > 0:
+                                if currency in ['USDT', 'USD', 'USDC']:
+                                    total += float(amount)
+                                else:
+                                    try:
+                                        ticker = self.safe_ccxt_call('fetch_ticker', f'{currency}/USDT')
+                                        if ticker and 'last' in ticker:
+                                            total += float(amount) * float(ticker['last'])
+                                    except Exception:
+                                        pass
+                    return total
+                except Exception as e:
+                    logger.exception("Error fetching live equity: %s", e)
                     return 0.0
-                
-                total = 0.0
-                if isinstance(bal, dict) and 'total' in bal:
-                    for currency, amount in bal['total'].items():
-                        if isinstance(amount, (int, float)) and amount > 0:
-                            if currency in ['USDT', 'USD', 'USDC']:
-                                total += float(amount)
-                            else:
-                                try:
-                                    ticker = self.safe_ccxt_call('fetch_ticker', f'{currency}/USDT')
-                                    if ticker and 'last' in ticker:
-                                        total += float(amount) * float(ticker['last'])
-                                except Exception:
-                                    pass
-                return total
-            except Exception as e:
-                logger.exception("Error fetching live equity: %s", e)
-                return 0.0
-        else:
-            total = 10000.0
-            for sym, pos in self.positions.items():
-                price = pos.get('price', 50000)
-                qty = pos.get('qty', 0)
-                total += qty * price
-            return total
+            return 0.0
+
+        total = float(self.paper_cash)
+        for sym, pos in self.positions.items():
+            price = pos.get('price', 50000)
+            qty = pos.get('qty', 0)
+            total += qty * price
+        return total
 
     def fetch_ohlcv_df(self, symbol, timeframe='5m', limit=300):
         """Fetch OHLCV data from exchange or generate synthetic for testing."""
@@ -491,7 +512,7 @@ class CryptoPiggyTop2026:
             return None
         
         # Minimum trade size
-        min_size = self.risk_settings.get('min_trade_size_usd', 10.0)
+        min_size = self.risk_settings.get('min_trade_size_usd', 2.0)
         if amount_usd < min_size:
             logger.warning(f'Order ${amount_usd:.2f} below minimum ${min_size:.2f} - rejected')
             return None
@@ -571,6 +592,8 @@ class CryptoPiggyTop2026:
                 if order:
                     logger.info(f"✅ Live order executed: {order.get('id', 'unknown')}")
                     self.daily_trades_count += 1
+                    order_id = order.get('id')
+                    exec_price = float(order.get('price') or order.get('average') or price)
                     
                     # Log trade
                     self.trade_log.append({
@@ -580,14 +603,19 @@ class CryptoPiggyTop2026:
                         'symbol': symbol,
                         'amount_usd': amount_usd,
                         'qty': qty,
-                        'price': price,
+                        'price': exec_price,
                         'live': True,
-                        'order_id': order.get('id'),
-                        'status': order.get('status')
+                        'order_id': order_id,
+                        'status': order.get('status', 'submitted')
                     })
+
+                    if side == 'buy':
+                        self.positions[symbol] = {'qty': qty, 'price': exec_price, 'entry_time': time.time()}
+                    elif side == 'sell' and symbol in self.positions:
+                        del self.positions[symbol]
                     
                     # Send notification
-                    self.send_telegram(f"✅ LIVE {side.upper()}: {qty:.6f} {symbol} @ ${price:.2f}")
+                    self.send_telegram(f"✅ LIVE {side.upper()}: {qty:.6f} {symbol} @ ${exec_price:.2f}")
                     
                     self.save_state()
                     return order
@@ -603,12 +631,21 @@ class CryptoPiggyTop2026:
         # PAPER TRADING PATH
         else:
             if side == 'buy':
+                if amount_usd > self.paper_cash:
+                    logger.warning(f"Insufficient paper cash: ${self.paper_cash:.2f} available, ${amount_usd:.2f} requested")
+                    return None
+                self.paper_cash -= amount_usd
                 self.positions[symbol] = {'qty': qty, 'price': price, 'entry_time': time.time()}
                 logger.info(f"📝 Paper BUY: {qty:.6f} {symbol} @ ${price:.2f} (${amount_usd:.2f})")
             else:
                 if symbol in self.positions:
+                    sell_qty = float(self.positions[symbol].get('qty', 0.0))
                     entry_price = self.positions[symbol].get('price', price)
                     pnl = (price - entry_price) / entry_price if entry_price > 0 else 0
+                    proceeds = sell_qty * price
+                    self.paper_cash += proceeds
+                    qty = sell_qty
+                    amount_usd = proceeds
                     logger.info(f"📝 Paper SELL: {qty:.6f} {symbol} @ ${price:.2f} (PnL: {pnl:.2%})")
                     del self.positions[symbol]
                 else:
@@ -678,7 +715,7 @@ class CryptoPiggyTop2026:
             if combined_entry and position == 0:
                 alloc = self.risk_settings.get('max_position_pct', 0.02)
                 amount_usd = cash * alloc
-                if amount_usd >= self.risk_settings.get('min_trade_size_usd', 10.0):
+                if amount_usd >= self.risk_settings.get('min_trade_size_usd', 2.0):
                     qty = amount_usd / price
                     position = qty
                     position_entry_price = price
@@ -744,10 +781,11 @@ class CryptoPiggyTop2026:
                 else:
                     params[k] = float(np.random.uniform(v[0], v[1]))
             self.strategies[strategy_name].params = params
-            score = self.backtest(strategy_name)
-            if score is not None and score > best_score:
+            result = self.backtest(strategy_name)
+            score = result.get('total_return', -np.inf) if isinstance(result, dict) else -np.inf
+            if np.isfinite(score) and score > best_score:
                 best_score = score
-                best_params = params
+                best_params = params.copy()
         self.strategies[strategy_name].params = best_params
         print(f"Best params: {best_params} with score {best_score:.2%}")
 
@@ -816,7 +854,9 @@ class CryptoPiggyTop2026:
         # Enable live mode
         self.paper_mode = False
         self.live_confirmed = True
+        self.daily_trades_count = 0
         self.daily_start_equity = self.get_equity()
+        self.last_trade_reset_day = datetime.utcnow().day
         
         print("\n✅ LIVE TRADING ENABLED")
         self.send_telegram("🔴 Live trading mode ENABLED")
@@ -826,9 +866,14 @@ class CryptoPiggyTop2026:
 
     def disable_live(self):
         """Disable live trading and return to paper mode."""
-        if self.is_live():
-            self.paper_mode = True
-            self.live_confirmed = False
+        was_live = self.is_live()
+        self.paper_mode = True
+        self.live_confirmed = False
+        self.daily_trades_count = 0
+        self.daily_start_equity = self.get_equity()
+        self.last_trade_reset_day = datetime.utcnow().day
+
+        if was_live:
             print("✅ Live trading disabled - switched to paper mode")
             self.send_telegram("✅ Live trading mode DISABLED - now in paper mode")
             logger.info("Live trading disabled")
@@ -840,25 +885,25 @@ class CryptoPiggyTop2026:
 
         Returns an array of predicted next closes aligned with input length (predictions start at index window-1).
         """
-        if len(closes) < window + 1:
-            return None
-        # prepare sequences
-        arr = np.array(closes).astype(float)
-        # scale
-        minv, maxv = arr.min(), arr.max()
-        denom = maxv - minv if maxv != minv else 1.0
-        scaled = (arr - minv) / denom
-
-        X = []
-        y = []
-        for i in range(len(scaled) - window):
-            X.append(scaled[i:i+window])
-            y.append(scaled[i+window])
-        X = np.array(X)
-        y = np.array(y)
-
-        # convert to torch
         try:
+            arr = np.array(closes, dtype=float)
+            if len(arr) < window + 1:
+                return None
+
+            # scale
+            minv, maxv = arr.min(), arr.max()
+            denom = maxv - minv if maxv != minv else 1.0
+            scaled = (arr - minv) / denom
+
+            X = []
+            y = []
+            for i in range(len(scaled) - window):
+                X.append(scaled[i:i+window])
+                y.append(scaled[i+window])
+            X = np.array(X)
+            y = np.array(y)
+
+            # convert to torch
             model = LSTMPredictor()
             optim_local = optim.Adam(model.parameters(), lr=0.001)
             loss_fn = nn.MSELoss()
@@ -879,11 +924,9 @@ class CryptoPiggyTop2026:
                     seq = X[i:i+1, :, None]
                     p = model(torch.tensor(seq, dtype=torch.float32)).numpy().ravel()[0]
                     preds.append(p * denom + minv)
-            # Align predictions: pad initial window-1 with None
-            preds_full = [None] * (window) + list(preds)
-            # Trim to input length
-            preds_full = preds_full[:len(closes)]
-            return np.array([p if p is not None else closes[i] for i, p in enumerate(preds_full)])
+            preds_full = np.array(arr, dtype=float)
+            preds_full[window:] = np.array(preds[:len(arr) - window], dtype=float)
+            return preds_full
         except Exception:
             logger.exception("LSTM prediction failed")
             return None
@@ -894,7 +937,15 @@ class CryptoPiggyTop2026:
             'trade_log': self.trade_log,
             'strategies': {k: v.params for k, v in self.strategies.items()},
             'paper_mode': self.paper_mode,
-            'active_strategy': self.active_strategy
+            'active_strategy': self.active_strategy,
+            'live_confirmed': self.live_confirmed,
+            'daily_trades_count': self.daily_trades_count,
+            'daily_start_equity': self.daily_start_equity,
+            'last_trade_reset_day': self.last_trade_reset_day,
+            'backend_enabled': self.backend_enabled,
+            'backend_user_id': self.backend_user_id,
+            'backend_url': self.backend_url,
+            'paper_cash': self.paper_cash,
         }
         with open('state.json', 'w') as f:
             json.dump(state, f, indent=2)
@@ -912,6 +963,22 @@ class CryptoPiggyTop2026:
                         self.strategies[k].params = v
                 self.paper_mode = state.get('paper_mode', True)
                 self.active_strategy = state.get('active_strategy', self.active_strategy)
+                self.live_confirmed = bool(state.get('live_confirmed', False))
+                self.daily_trades_count = int(state.get('daily_trades_count', 0) or 0)
+                try:
+                    self.daily_start_equity = float(state.get('daily_start_equity', 0.0) or 0.0)
+                except Exception:
+                    self.daily_start_equity = 0.0
+                self.last_trade_reset_day = int(state.get('last_trade_reset_day', datetime.utcnow().day) or datetime.utcnow().day)
+                self.backend_enabled = bool(state.get('backend_enabled', self.backend_enabled))
+                self.backend_user_id = state.get('backend_user_id', self.backend_user_id)
+                self.backend_url = state.get('backend_url', self.backend_url)
+                try:
+                    self.paper_cash = float(state.get('paper_cash', 10000.0) or 10000.0)
+                except Exception:
+                    self.paper_cash = 10000.0
+                if self.paper_mode:
+                    self.live_confirmed = False
             except Exception:
                 logger.exception("Failed to load state.json")
 

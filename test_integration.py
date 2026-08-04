@@ -329,7 +329,21 @@ def test_9_state_persistence():
         
         # Create bot and add trades
         bot1 = CryptoPiggyTop2026()
-        bot1.place_order('buy', 'BTC/USDT', 10)
+        bot1.paper_mode = False
+        bot1.live_confirmed = True
+        bot1.daily_trades_count = 7
+        bot1.daily_start_equity = 12345.67
+        bot1.last_trade_reset_day = 15
+        bot1.trade_log.append({
+            'time': time.time(),
+            'datetime': datetime.utcnow().isoformat(),
+            'side': 'buy',
+            'symbol': 'BTC/USDT',
+            'amount_usd': 10.0,
+            'qty': 0.0002,
+            'price': 50000.0,
+            'live': True,
+        })
         bot1.save_state()
         
         trades_count_before = len(bot1.trade_log)
@@ -338,8 +352,16 @@ def test_9_state_persistence():
         # Load state in new bot
         bot2 = CryptoPiggyTop2026()
         trades_count_after = len(bot2.trade_log)
-        
-        matches = trades_count_before == trades_count_after
+
+        state_checks = [
+            trades_count_before == trades_count_after,
+            bot2.paper_mode is False,
+            bot2.live_confirmed is True,
+            bot2.daily_trades_count == 7,
+            abs(float(bot2.daily_start_equity) - 12345.67) < 1e-9,
+            int(bot2.last_trade_reset_day) == 15,
+        ]
+        matches = all(state_checks)
         print(f"✅ State persisted across instances: {matches}")
         
         # Cleanup
@@ -350,6 +372,34 @@ def test_9_state_persistence():
         return matches
     except Exception as e:
         print(f"❌ State persistence test failed: {e}")
+        return False
+
+
+def test_11_hyperopt_no_typeerror():
+    """Test hyperopt handles backtest dict results without TypeError."""
+    print("\n" + "="*70)
+    print("TEST 11: HYPEROPT SCORE TYPE SAFETY")
+    print("="*70)
+
+    try:
+        from crypto_piggy_top import CryptoPiggyTop2026
+
+        bot = CryptoPiggyTop2026()
+        ranges = {
+            'short_window': (5, 6),
+            'long_window': (20, 21),
+        }
+
+        bot.hyperopt('sma_crossover', ranges, trials=2)
+        params = bot.strategies['sma_crossover'].params
+        has_expected_keys = ('short_window' in params) and ('long_window' in params)
+        print(f"✅ Hyperopt completed without TypeError: {has_expected_keys}")
+        return has_expected_keys
+    except TypeError as e:
+        print(f"❌ Hyperopt TypeError: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Hyperopt test failed: {e}")
         return False
 
 
@@ -401,6 +451,7 @@ def run_all_tests():
         test_8_backtest,
         test_9_state_persistence,
         test_10_live_mode_guards,
+        test_11_hyperopt_no_typeerror,
     ]
     
     results = []

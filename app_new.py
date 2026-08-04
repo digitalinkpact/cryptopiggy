@@ -20,6 +20,30 @@ logger = logging.getLogger('CryptoPiggyApp')
 CREDENTIALS_PATH = Path('.cryptopiggy/credentials.json')
 
 
+def _reset_daily_tracking(bot):
+    bot.daily_trades_count = 0
+    bot.daily_start_equity = bot.get_equity()
+    bot.last_trade_reset_day = time.gmtime().tm_mday
+
+
+def _sync_result_is_success(resp):
+    if not isinstance(resp, dict):
+        return False
+
+    status = str(resp.get('status', '')).strip().lower()
+    if resp.get('ok') is True:
+        return True
+    if resp.get('canTrade') is True:
+        return True
+    if resp.get('validated') is True:
+        return True
+    if status in ('ok', 'success'):
+        return True
+    if resp.get('status_code') == 200 and not resp.get('error'):
+        return True
+    return False
+
+
 def _load_credentials():
     data = {}
     if CREDENTIALS_PATH.exists():
@@ -181,9 +205,10 @@ bot.set_backend(creds['user_id'], url=creds['backend_url'], enabled=bool(creds.g
 bot.backend_last_health = health_ok
 bot.exchange_name = creds.get('exchange') or bot.exchange_name
 
-if bot.is_live() and not health_ok:
+if (not bot.paper_mode and bot.live_confirmed) and not health_ok:
     bot.paper_mode = True
     bot.live_confirmed = False
+    _reset_daily_tracking(bot)
     st.error('⚠️ Live trading disabled: backend health check failed')
 
 # Custom CSS for better styling
@@ -279,9 +304,7 @@ with st.sidebar:
                     'apiSecret': api_secret.strip()
                 }
                 resp = _sync_credentials(backend_url.strip(), payload)
-                ok = bool(resp.get('ok') or resp.get('canTrade') or resp.get('validated') or resp.get('status') in ['ok', 'success'])
-                if resp.get('status_code') == 200 and resp.get('error') is None:
-                    ok = True
+                ok = _sync_result_is_success(resp)
                 if ok:
                     creds.update({
                         'user_id': user_id.strip(),
@@ -347,8 +370,7 @@ with st.sidebar:
                     if user_token == confirm_token:
                         bot.paper_mode = False
                         bot.live_confirmed = True
-                        bot.daily_trades_count = 0
-                        bot.daily_start_equity = bot.get_equity()
+                        _reset_daily_tracking(bot)
                         bot.send_telegram("🔴 Live trading ENABLED via Streamlit")
                         logger.warning("LIVE TRADING MODE ENABLED BY USER")
                         st.success('✅ Live trading enabled!')
@@ -359,8 +381,7 @@ with st.sidebar:
                 if st.button('🔴 ENABLE LIVE TRADING (I understand the risks)', type='primary'):
                     bot.paper_mode = False
                     bot.live_confirmed = True
-                    bot.daily_trades_count = 0
-                    bot.daily_start_equity = bot.get_equity()
+                    _reset_daily_tracking(bot)
                     bot.send_telegram("🔴 Live trading ENABLED via Streamlit")
                     logger.warning("LIVE TRADING MODE ENABLED BY USER")
                     st.success('✅ Live trading enabled!')
@@ -369,9 +390,7 @@ with st.sidebar:
     elif not live_mode_requested and bot.is_live():
         bot.paper_mode = True
         bot.live_confirmed = False
-        # Reset daily counters when switching modes for safety
-        bot.daily_trades_count = 0
-        bot.daily_start_equity = bot.get_equity()
+        _reset_daily_tracking(bot)
         bot.send_telegram("✅ Live trading DISABLED via Streamlit")
         st.info('Switched to paper trading')
         st.rerun()
@@ -598,8 +617,7 @@ with tab3:
             if st.button('🛑 Emergency Stop (Disable Live)', type='secondary'):
                 bot.paper_mode = True
                 bot.live_confirmed = False
-                bot.daily_trades_count = 0
-                bot.daily_start_equity = bot.get_equity()
+                _reset_daily_tracking(bot)
                 bot.send_telegram("🛑 EMERGENCY STOP: Live trading disabled via Streamlit")
                 logger.warning("EMERGENCY STOP: Live trading disabled by user")
                 st.warning('Live trading disabled')

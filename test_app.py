@@ -309,7 +309,7 @@ def test_order_validation():
         bot = CryptoPiggyTop2026()
         
         # Test minimum size rejection
-        result = bot.place_order('buy', 'BTC/USDT', 5.0)  # Below $10 min
+        result = bot.place_order('buy', 'BTC/USDT', 1.0)  # Below $2 min
         if result is not None:
             print("⚠️  Minimum size validation: order should have been rejected")
         else:
